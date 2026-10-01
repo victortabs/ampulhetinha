@@ -106,7 +106,7 @@ struct PromptView: View {
             HStack(spacing: 10) {
                 HourglassBadge(size: 30)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(Fmt.longDuration(minutes: model.minutes))
+                    Text(Fmt.shortRemaining(TimeInterval(model.minutes * 60)))
                         .font(.system(size: 16, weight: .semibold, design: .rounded))
                     Text(Fmt.at(model.fireDate))
                         .font(.system(size: 13, weight: .medium, design: .rounded))
@@ -154,7 +154,7 @@ final class TitlePrompt: NSObject, NSWindowDelegate {
     private var previousApp: NSRunningApplication?
 
     /// `bubble`: onde estava a bolha do arrasto (o campo aparece no mesmo lugar).
-    func present(minutes: Int, start: Date = Date(), bubble: NSRect?, alignRight: Bool, screen: NSScreen?,
+    func present(minutes: Int, start: Date = Date(), bubble: NSRect?, screen: NSScreen?,
                  commit: @escaping (String, Int, Date) -> Void) {
         if !finished { commitNow() }
         finished = false
@@ -171,7 +171,7 @@ final class TitlePrompt: NSObject, NSWindowDelegate {
         let visible = (screen ?? NSScreen.main)?.visibleFrame ?? .zero
         var origin: NSPoint
         if let b = bubble {
-            origin = NSPoint(x: alignRight ? b.maxX - size.width : b.minX, y: b.midY - size.height / 2)
+            origin = NSPoint(x: b.midX - size.width / 2, y: b.maxY - size.height)
         } else {
             origin = NSPoint(x: visible.maxX - size.width - 12, y: visible.maxY - size.height - 8)
         }

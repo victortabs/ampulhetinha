@@ -21,7 +21,6 @@ final class DragOverlayController {
 
     private(set) var screen: NSScreen?
     private(set) var bubbleScreenFrame: NSRect = .zero
-    private(set) var bubbleOnLeft = true
 
     func show(on screen: NSScreen, anchor: NSPoint) {
         let w = window ?? makeWindow()
@@ -40,8 +39,8 @@ final class DragOverlayController {
         bubbleContent.minutes = minutes
         bubbleContent.fireDate = fireDate
         layoutBubble(knob: local, screen: screen)
-        lineView.move(knob: local, active: minutes > 0, bubble: bubble.frame,
-                      pointerOnRight: bubbleOnLeft, pointerY: bubbleContent.pointerY)
+        lineView.move(knob: local, minutes: minutes, bubble: bubble.frame,
+                      pointerUp: bubbleContent.pointerUp, pointerX: bubbleContent.pointerX)
         bubble.isHidden = false
     }
 
@@ -75,36 +74,38 @@ final class DragOverlayController {
         return w
     }
 
+    /// Balão centralizado embaixo da ampulheta, com o biquinho para cima;
+    /// sobe para cima dela só quando não cabe no pé da tela.
     private func layoutBubble(knob: NSPoint, screen: NSScreen) {
         let bounds = NSRect(origin: .zero, size: screen.frame.size)
-        let menuBar = screen.frame.maxY - screen.visibleFrame.maxY
         let body = bubbleContent.bodySize()
-        let size = NSSize(width: body.width + BubbleShape.pointerWidth, height: body.height)
-        let gap = DragLineView.knobRadius + 8
+        let size = NSSize(width: body.width, height: body.height + BubbleShape.pointerWidth)
+        let gap = DragLineView.knobRadius + 4
 
-        var onLeft = true
-        var x = knob.x - gap - size.width
-        if x < bounds.minX + 8 {
-            onLeft = false
-            x = knob.x + gap
+        var up = true
+        var y = knob.y - gap - size.height
+        if y < bounds.minY + 8 {
+            up = false
+            y = knob.y + gap
         }
-        var y = knob.y - size.height / 2
-        y = min(max(y, bounds.minY + 8), bounds.maxY - menuBar - size.height - 4)
-        let pointerY = min(max(knob.y - y, 20), size.height - 20).rounded()
+        // Origem arredondada (não .integral): o tamanho não oscila 1 pt e a máscara não é refeita.
+        let x = min(max(knob.x - size.width / 2, bounds.minX + 8), bounds.maxX - size.width - 8).rounded()
+        y = y.rounded()
+        let inset = BubbleShape.radius + BubbleShape.pointerHalf
+        let pointerX = min(max(knob.x - x, inset), size.width - inset).rounded()
 
-        let frame = NSRect(x: x, y: y, width: size.width, height: size.height).integral
+        let frame = NSRect(x: x, y: y, width: size.width, height: size.height)
         bubble.frame = frame
         bubbleContent.frame = bubble.bounds
-        bubbleContent.pointerOnRight = onLeft
-        bubbleContent.pointerY = pointerY
+        bubbleContent.pointerUp = up
+        bubbleContent.pointerX = pointerX
         bubbleContent.needsDisplay = true
 
-        let key = "\(Int(frame.width))x\(Int(frame.height))-\(onLeft)-\(Int(pointerY))"
+        let key = "\(Int(frame.width))x\(Int(frame.height))-\(up)-\(Int(pointerX))"
         if key != maskKey {
             maskKey = key
-            bubble.maskImage = BubbleShape.mask(size: frame.size, pointerOnRight: onLeft, pointerY: pointerY)
+            bubble.maskImage = BubbleShape.mask(size: frame.size, pointerUp: up, pointerX: pointerX)
         }
-        bubbleOnLeft = onLeft
         bubbleScreenFrame = frame.offsetBy(dx: screen.frame.minX, dy: screen.frame.minY)
     }
 }
@@ -112,34 +113,65 @@ final class DragOverlayController {
 // MARK: - Cordão + bolinha
 
 final class DragLineView: NSView {
-    static let knobRadius: CGFloat = 15
+    static let knobRadius: CGFloat = 20
 
     private var anchor = NSPoint.zero
     private var knob = NSPoint.zero
     private var active = false
     private var bubbleFrame = NSRect.zero
-    private var pointerOnRight = true
-    private var pointerY: CGFloat = 0
+    private var pointerUp = true
+    private var pointerX: CGFloat = 0
+    /// A ampulheta da bolinha gira 22,5° a cada 5 min (horário ao aumentar), com a virada suavizada.
+    private var iconAngle: CGFloat = 0
+    private var targetAngle: CGFloat = 0
+    private var spin: Timer?
 
-    private lazy var knobIcon = NSImage.symbol("hourglass", size: 13, weight: .bold).tinted(.white)
-    private lazy var cancelIcon = NSImage.symbol("xmark", size: 11, weight: .heavy).tinted(.white)
+    private lazy var knobSymbol = NSImage.symbol("hourglass", size: 32, weight: .bold)
+    private lazy var cancelSymbol = NSImage.symbol("xmark", size: 18, weight: .heavy)
+    private lazy var knobIcon = knobSymbol.tinted(Palette.gradient)
+    private lazy var knobHalo = knobSymbol.tinted(.white)
+    private lazy var cancelIcon = cancelSymbol.tinted(Palette.muted)
+    private lazy var cancelHalo = cancelSymbol.tinted(.white)
 
     func reset(anchor a: NSPoint) {
         anchor = a
         knob = a
         active = false
         bubbleFrame = .zero
+        iconAngle = 0
+        targetAngle = 0
+        spin?.invalidate()
+        spin = nil
         needsDisplay = true
     }
 
-    func move(knob new: NSPoint, active: Bool, bubble: NSRect, pointerOnRight: Bool, pointerY: CGFloat) {
+    func move(knob new: NSPoint, minutes: Int, bubble: NSRect, pointerUp: Bool, pointerX: CGFloat) {
         let old = dirtyBounds()
         knob = new
-        self.active = active
+        active = minutes > 0
+        targetAngle = -CGFloat(minutes) * 22.5 / 5
+        if spin == nil && iconAngle != targetAngle {
+            let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.stepSpin() }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            spin = t
+        }
         bubbleFrame = bubble
-        self.pointerOnRight = pointerOnRight
-        self.pointerY = pointerY
+        self.pointerUp = pointerUp
+        self.pointerX = pointerX
         setNeedsDisplay(old.union(dirtyBounds()))
+    }
+
+    private func stepSpin() {
+        iconAngle += (targetAngle - iconAngle) * 0.25
+        if abs(targetAngle - iconAngle) < 0.3 {
+            iconAngle = targetAngle
+            spin?.invalidate()
+            spin = nil
+        }
+        let r = Self.knobRadius + 12
+        setNeedsDisplay(NSRect(x: knob.x - r, y: knob.y - r, width: r * 2, height: r * 2))
     }
 
     private func dirtyBounds() -> NSRect {
@@ -176,7 +208,7 @@ final class DragLineView: NSView {
     /// Cordão afinando do topo (mais grosso) até a ponta.
     private func cordPath(extra: CGFloat) -> NSBezierPath {
         let steps = 48
-        let top: CGFloat = 6 + extra, end: CGFloat = 3.2 + extra
+        let top: CGFloat = 4 + extra, end: CGFloat = 2.2 + extra
         var left: [NSPoint] = [], right: [NSPoint] = []
         for i in 0...steps {
             let t = CGFloat(i) / CGFloat(steps)
@@ -189,9 +221,11 @@ final class DragLineView: NSView {
         path.move(to: left[0])
         left.dropFirst().forEach { path.line(to: $0) }
         right.reversed().forEach { path.line(to: $0) }
+        // Ponta redonda no mesmo contorno: um círculo à parte, girando ao contrário, abria um buraco.
+        let d = tangent(0)
+        let start = atan2(-d.dx, d.dy) * 180 / .pi
+        path.appendArc(withCenter: anchor, radius: top / 2, startAngle: start, endAngle: start - 180, clockwise: true)
         path.close()
-        let r = top / 2
-        path.append(NSBezierPath(ovalIn: NSRect(x: anchor.x - r, y: anchor.y - r, width: r * 2, height: r * 2)))
         return path
     }
 
@@ -212,7 +246,7 @@ final class DragLineView: NSView {
         shadow.shadowOffset = NSSize(width: 0, height: -2)
         shadow.set()
         NSColor.white.withAlphaComponent(0.9).setFill()
-        cordPath(extra: 1.8).fill()
+        cordPath(extra: 1.4).fill()
         NSGraphicsContext.restoreGraphicsState()
 
         // Cordão em degradê, do topo até a bolinha.
@@ -221,43 +255,43 @@ final class DragLineView: NSView {
         gradient.draw(from: anchor, to: knob, options: [.drawsBeforeStartingLocation, .drawsAfterEndingLocation])
         NSGraphicsContext.restoreGraphicsState()
 
-        drawKnob(gradient: gradient)
+        drawKnob()
     }
 
-    private func drawKnob(gradient: NSGradient) {
-        let r = active ? Self.knobRadius : Self.knobRadius - 3
-        let outer = NSRect(x: knob.x - r - 2.5, y: knob.y - r - 2.5, width: (r + 2.5) * 2, height: (r + 2.5) * 2)
-        let inner = NSRect(x: knob.x - r, y: knob.y - r, width: r * 2, height: r * 2)
-
+    /// Só a ampulheta (sem disco), no degradê do cordão e com o mesmo contorno branco + sombra.
+    private func drawKnob() {
+        let (icon, halo) = active ? (knobIcon, knobHalo) : (cancelIcon, cancelHalo)
         NSGraphicsContext.saveGraphicsState()
+        let rotation = NSAffineTransform()
+        rotation.translateX(by: knob.x, yBy: knob.y)
+        rotation.rotate(byDegrees: active ? iconAngle : 0)
+        rotation.concat()
+        let rect = NSRect(x: -icon.size.width / 2, y: -icon.size.height / 2, width: icon.size.width, height: icon.size.height)
+
+        // Contorno: a silhueta branca carimbada em volta, numa camada só para a sombra sair uma vez.
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
-        shadow.shadowBlurRadius = 10
-        shadow.shadowOffset = NSSize(width: 0, height: -3)
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+        shadow.shadowBlurRadius = 5
+        shadow.shadowOffset = NSSize(width: 0, height: -2)
         shadow.set()
-        NSColor.white.setFill()
-        NSBezierPath(ovalIn: outer).fill()
+        NSGraphicsContext.current?.cgContext.beginTransparencyLayer(auxiliaryInfo: nil)
+        for i in 0..<8 {
+            let a = CGFloat(i) * .pi / 4
+            halo.draw(in: rect.offsetBy(dx: 1.6 * cos(a), dy: 1.6 * sin(a)))
+        }
+        NSGraphicsContext.current?.cgContext.endTransparencyLayer()
         NSGraphicsContext.restoreGraphicsState()
 
-        let disc = NSBezierPath(ovalIn: inner)
-        gradient.draw(in: disc, angle: -60)
-
-        // Brilho sutil na metade de cima.
         NSGraphicsContext.saveGraphicsState()
-        disc.addClip()
-        NSGradient(colors: [NSColor.white.withAlphaComponent(0.35), NSColor.white.withAlphaComponent(0)])!
-            .draw(in: NSRect(x: inner.minX, y: inner.midY - 2, width: inner.width, height: inner.height / 2 + 2), angle: -90)
+        rotation.concat()
+        icon.draw(in: rect)
         NSGraphicsContext.restoreGraphicsState()
-
-        let icon = active ? knobIcon : cancelIcon
-        icon.draw(in: NSRect(x: (knob.x - icon.size.width / 2).rounded(), y: (knob.y - icon.size.height / 2).rounded(),
-                             width: icon.size.width, height: icon.size.height))
     }
 
     /// Sombra do balão (só por fora dele; o balão é desenhado por cima, translúcido).
     private func drawBubbleShadow() {
         guard !bubbleFrame.isEmpty else { return }
-        let shape = BubbleShape.path(in: bubbleFrame, pointerOnRight: pointerOnRight, pointerY: pointerY)
+        let shape = BubbleShape.path(in: bubbleFrame, pointerUp: pointerUp, pointerX: pointerX)
         NSGraphicsContext.saveGraphicsState()
         let clip = NSBezierPath(rect: bubbleFrame.insetBy(dx: -40, dy: -40))
         clip.append(shape)
@@ -281,41 +315,41 @@ enum BubbleShape {
     static let pointerWidth: CGFloat = 11
     static let pointerHalf: CGFloat = 10
 
-    /// Retângulo arredondado + biquinho apontando para a bolinha, num contorno só.
-    static func path(in rect: NSRect, pointerOnRight: Bool, pointerY: CGFloat) -> NSBezierPath {
+    /// Retângulo arredondado + biquinho (em cima ou embaixo) apontando para a ampulheta, num contorno só.
+    static func path(in rect: NSRect, pointerUp: Bool, pointerX: CGFloat) -> NSBezierPath {
         let r = radius, h = pointerHalf
-        let b = pointerOnRight
-            ? NSRect(x: rect.minX, y: rect.minY, width: rect.width - pointerWidth, height: rect.height)
-            : NSRect(x: rect.minX + pointerWidth, y: rect.minY, width: rect.width - pointerWidth, height: rect.height)
-        let py = rect.minY + pointerY
+        let b = pointerUp
+            ? NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height - pointerWidth)
+            : NSRect(x: rect.minX, y: rect.minY + pointerWidth, width: rect.width, height: rect.height - pointerWidth)
+        let px = rect.minX + pointerX
         let p = NSBezierPath()
         p.move(to: NSPoint(x: b.minX + r, y: b.minY))
+        if !pointerUp {
+            p.line(to: NSPoint(x: px - h, y: b.minY))
+            p.line(to: NSPoint(x: px, y: rect.minY))
+            p.line(to: NSPoint(x: px + h, y: b.minY))
+        }
         p.line(to: NSPoint(x: b.maxX - r, y: b.minY))
         p.appendArc(withCenter: NSPoint(x: b.maxX - r, y: b.minY + r), radius: r, startAngle: 270, endAngle: 360)
-        if pointerOnRight {
-            p.line(to: NSPoint(x: b.maxX, y: py - h))
-            p.line(to: NSPoint(x: rect.maxX, y: py))
-            p.line(to: NSPoint(x: b.maxX, y: py + h))
-        }
         p.line(to: NSPoint(x: b.maxX, y: b.maxY - r))
         p.appendArc(withCenter: NSPoint(x: b.maxX - r, y: b.maxY - r), radius: r, startAngle: 0, endAngle: 90)
+        if pointerUp {
+            p.line(to: NSPoint(x: px + h, y: b.maxY))
+            p.line(to: NSPoint(x: px, y: rect.maxY))
+            p.line(to: NSPoint(x: px - h, y: b.maxY))
+        }
         p.line(to: NSPoint(x: b.minX + r, y: b.maxY))
         p.appendArc(withCenter: NSPoint(x: b.minX + r, y: b.maxY - r), radius: r, startAngle: 90, endAngle: 180)
-        if !pointerOnRight {
-            p.line(to: NSPoint(x: b.minX, y: py + h))
-            p.line(to: NSPoint(x: rect.minX, y: py))
-            p.line(to: NSPoint(x: b.minX, y: py - h))
-        }
         p.line(to: NSPoint(x: b.minX, y: b.minY + r))
         p.appendArc(withCenter: NSPoint(x: b.minX + r, y: b.minY + r), radius: r, startAngle: 180, endAngle: 270)
         p.close()
         return p
     }
 
-    static func mask(size: NSSize, pointerOnRight: Bool, pointerY: CGFloat) -> NSImage {
+    static func mask(size: NSSize, pointerUp: Bool, pointerX: CGFloat) -> NSImage {
         NSImage(size: size, flipped: false) { rect in
             NSColor.black.setFill()
-            path(in: rect, pointerOnRight: pointerOnRight, pointerY: pointerY).fill()
+            path(in: rect, pointerUp: pointerUp, pointerX: pointerX).fill()
             return true
         }
     }
@@ -324,37 +358,40 @@ enum BubbleShape {
 final class BubbleContentView: NSView {
     var minutes = 0
     var fireDate = Date()
-    var pointerOnRight = true
-    var pointerY: CGFloat = 36
+    var pointerUp = true
+    var pointerX: CGFloat = 36
 
     private let height: CGFloat = 72
     private let pad: CGFloat = 9
     private let font1 = NSFont.rounded(20, .semibold)
-    private let font2 = NSFont.rounded(15, .medium)
+    private let font2 = NSFont.rounded(15, .semibold)
 
-    private var line1: String { minutes > 0 ? Fmt.longDuration(minutes: minutes) : "Cancelar" }
+    private var line1: String { minutes > 0 ? Fmt.shortRemaining(TimeInterval(minutes * 60)) : "Cancelar" }
     private var line2: String { minutes > 0 ? Fmt.at(fireDate) : "solte aqui para desistir" }
 
     private var attrs1: [NSAttributedString.Key: Any] { [.font: font1, .foregroundColor: NSColor.white] }
     private var attrs2: [NSAttributedString.Key: Any] {
-        [.font: font2, .foregroundColor: NSColor.white.withAlphaComponent(0.72)]
+        [.font: font2, .foregroundColor: NSColor.white.withAlphaComponent(0.92)]
     }
 
+    /// Largura fixa enquanto há tempo: não pula entre "45 min" e "1 h 15 min"
+    /// (só cresce se precisar, como "amanhã às…"; mudar a largura refaz a máscara do balão e engasga o arrasto).
     func bodySize() -> NSSize {
-        let w = max((line1 as NSString).size(withAttributes: attrs1).width,
-                    (line2 as NSString).size(withAttributes: attrs2).width)
+        let (l1, l2) = minutes > 0 ? ("8 h 88 min", "às 88:88") : ("", "")
+        let w = max((l1 as NSString).size(withAttributes: attrs1).width, (line1 as NSString).size(withAttributes: attrs1).width,
+                    (l2 as NSString).size(withAttributes: attrs2).width, (line2 as NSString).size(withAttributes: attrs2).width)
         let clock = height - pad * 2
         return NSSize(width: (pad + clock + 12 + w + 20).rounded(.up), height: height)
     }
 
     private var bodyRect: NSRect {
-        pointerOnRight
-            ? NSRect(x: 0, y: 0, width: bounds.width - BubbleShape.pointerWidth, height: bounds.height)
-            : NSRect(x: BubbleShape.pointerWidth, y: 0, width: bounds.width - BubbleShape.pointerWidth, height: bounds.height)
+        pointerUp
+            ? NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - BubbleShape.pointerWidth)
+            : NSRect(x: 0, y: BubbleShape.pointerWidth, width: bounds.width, height: bounds.height - BubbleShape.pointerWidth)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let outline = BubbleShape.path(in: bounds.insetBy(dx: 0.5, dy: 0.5), pointerOnRight: pointerOnRight, pointerY: pointerY - 0.5)
+        let outline = BubbleShape.path(in: bounds.insetBy(dx: 0.5, dy: 0.5), pointerUp: pointerUp, pointerX: pointerX - 0.5)
         NSColor(white: 0.05, alpha: 0.2).setFill()
         outline.fill()
         NSColor(white: 1, alpha: 0.18).setStroke()
@@ -464,6 +501,17 @@ extension NSImage {
     static func symbol(_ name: String, size: CGFloat, weight: NSFont.Weight = .regular) -> NSImage {
         let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) ?? NSImage()
         return base.withSymbolConfiguration(.init(pointSize: size, weight: weight)) ?? base
+    }
+
+    func tinted(_ gradient: NSGradient) -> NSImage {
+        let img = NSImage(size: size, flipped: false) { rect in
+            self.draw(in: rect)
+            NSGraphicsContext.current?.compositingOperation = .sourceAtop
+            gradient.draw(in: rect, angle: -60)
+            return true
+        }
+        img.isTemplate = false
+        return img
     }
 
     func tinted(_ color: NSColor) -> NSImage {

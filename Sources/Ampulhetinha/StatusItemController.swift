@@ -15,6 +15,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var dragging = false
     private var anchor = NSPoint.zero
     private var dragMinutes = 0
+    private var dragStart = Date()
+    private var lastDrag: (point: NSPoint, fine: Bool, at: Date) = (.zero, false, .distantPast)
     private var hapticBucket = 0
     private var lastPopoverClose = Date.distantPast
 
@@ -157,7 +159,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         } else {
             x = rect.minX + 6 + (button.image?.size.width ?? 16) / 2
         }
-        return (NSPoint(x: x, y: rect.minY + 3), screen)
+        // O cordão nasce logo abaixo da barra de menus, não por cima dela.
+        return (NSPoint(x: x, y: min(rect.minY, screen.visibleFrame.maxY) - 2), screen)
     }
 
     private func beginDrag() {
@@ -166,6 +169,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         anchor = a
         dragMinutes = 0
         hapticBucket = 0
+        lastDrag.at = .distantPast
         if popover.isShown { popover.performClose(nil) }
         overlay.show(on: screen, anchor: a)
     }
@@ -174,30 +178,32 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard let screen = overlay.screen else { return }
         let f = screen.frame
         let p = NSPoint(x: min(max(point.x, f.minX + 2), f.maxX - 2), y: min(max(point.y, f.minY + 2), f.maxY - 2))
-        let range = anchor.y - screen.visibleFrame.minY
+        // O poller roda a 120 Hz: com o mouse parado só refaz 1×/s (para o horário do balão andar).
+        let now = Date()
+        let moved = p != lastDrag.point || fine != lastDrag.fine
+        guard moved || now.timeIntervalSince(lastDrag.at) >= 1 else { return }
+        lastDrag = (p, fine, now)
         let distance = hypot(p.x - anchor.x, p.y - anchor.y)
-        let minutes = DurationMapper(maxMinutes: Settings.shared.maxDragMinutes)
-            .minutes(distance: distance, range: range, fine: fine)
+        let (minutes, start) = DurationMapper.choice(distance: distance, fine: fine)
 
-        // Toque leve no trackpad a cada marco (5 min no começo, depois 15 min).
-        let bucket = minutes == 0 ? -1 : (minutes < 60 ? minutes / 5 : 100 + minutes / 15)
-        if bucket != hapticBucket {
-            hapticBucket = bucket
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        // Toque leve no trackpad a cada opção nova (só se foi o mouse que mudou, não o relógio).
+        if minutes != hapticBucket {
+            hapticBucket = minutes
+            if moved { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
         }
         dragMinutes = minutes
-        overlay.update(cursor: p, minutes: minutes, fireDate: Date().addingTimeInterval(TimeInterval(minutes * 60)))
+        dragStart = start
+        overlay.update(cursor: p, minutes: minutes, fireDate: start.addingTimeInterval(TimeInterval(minutes * 60)))
     }
 
     private func endDrag() {
         let minutes = dragMinutes
         let bubble = overlay.bubbleScreenFrame
-        let alignRight = overlay.bubbleOnLeft
         let screen = overlay.screen
         overlay.hide()
         guard minutes > 0 else { return }
-        let start = Date()
-        TitlePrompt.shared.present(minutes: minutes, start: start, bubble: bubble, alignRight: alignRight,
+        let start = dragStart
+        TitlePrompt.shared.present(minutes: minutes, start: start, bubble: bubble,
                                    screen: screen) { [store] title, minutes, start in
             store.add(title: title, minutes: minutes, start: start)
         }

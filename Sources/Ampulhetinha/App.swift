@@ -42,7 +42,7 @@ final class Coordinator {
 
     func newTimer(minutes: Int) {
         status?.closePopover()
-        TitlePrompt.shared.present(minutes: minutes, bubble: nil, alignRight: true,
+        TitlePrompt.shared.present(minutes: minutes, bubble: nil,
                                    screen: status?.promptAnchorScreen()) { title, minutes, start in
             TimerStore.shared.add(title: title, minutes: minutes, start: start)
         }

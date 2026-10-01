@@ -59,31 +59,41 @@ struct ExternalReminder {
     var listName: String
 }
 
-/// Converte a distância arrastada em minutos: curva exponencial (precisão nos
-/// tempos curtos, alcance nos longos) com "degraus" que crescem com o valor.
-struct DurationMapper {
+/// Converte a distância arrastada em minutos: 400 pt para a primeira hora, depois 100 pt por hora.
+enum DurationMapper {
     static let deadZone: CGFloat = 22
+    static let firstHour: CGFloat = 400
+    static let perHourAfter: CGFloat = 100
 
-    var maxMinutes: Int
-
-    func minutes(distance: CGFloat, range: CGFloat, fine: Bool) -> Int {
-        guard distance > Self.deadZone else { return 0 }
-        let usable = max(range - Self.deadZone, 160)
-        let t = Double(min(1, (distance - Self.deadZone) / usable))
-        let maxM = Double(max(maxMinutes, 5))
-        // Parte linear: os primeiros centímetros já andam de minuto em minuto.
-        // Parte exponencial: o resto da tela alcança as horas.
-        let linear = min(45, maxM - 1)
-        let k = min(2.6, max(1.5, log10(maxM) * 0.9))
-        let raw = 1 + linear * t + (maxM - 1 - linear) * pow(t, k)
-        return snap(raw, fine: fine)
+    /// Minutos escolhidos e o início do timer (recuado até o minuto cheio quando o alvo é um horário redondo).
+    static func choice(distance: CGFloat, fine: Bool, now: Date = Date()) -> (minutes: Int, start: Date) {
+        guard distance > deadZone else { return (0, now) }
+        let d = distance - deadZone
+        let hours = d <= firstHour ? d / firstHour : 1 + (d - firstHour) / perHourAfter
+        return snap(max(1, Double(hours) * 60), fine: fine, now: now)
     }
 
-    private func snap(_ raw: Double, fine: Bool) -> Int {
+    /// Com ⌥: de minuto em minuto. Sem: degraus a partir de agora (5, 10, 15…; 15 em 15 depois da primeira
+    /// hora) intercalados com os que caem em horário redondo (às 12:17, 3 min → 12:20 e 8 min → 12:25),
+    /// o que estiver mais perto.
+    static func snap(_ raw: Double, fine: Bool, now: Date) -> (minutes: Int, start: Date) {
         let step: Double
-        if fine || raw < 60 { step = 1 } else if raw < 180 { step = 5 } else if raw < 720 { step = 15 } else { step = 30 }
-        let v = (raw / step).rounded() * step
-        return Int(min(Double(maxMinutes), max(1, v)))
+        if fine { step = 1 } else if raw < 60 { step = 5 } else { step = 15 }
+        let relative = max(fine ? 1 : step, (raw / step).rounded() * step)
+        guard !fine else { return (Int(relative), now) }
+
+        // Redondos contam do minuto cheio, para disparar no :00; e só valem a partir de 1 min de distância.
+        let cal = Calendar.current
+        let floored = cal.dateInterval(of: .minute, for: now)?.start ?? now
+        let minuteOfDay = Double(cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now))
+        let off = minuteOfDay.truncatingRemainder(dividingBy: step)
+        var round = ((raw + off) / step).rounded() * step - off
+        while round * 60 - now.timeIntervalSince(floored) < 60 { round += step }
+
+        if abs(round - raw) <= abs(relative - raw) {
+            return (Int(round), floored)
+        }
+        return (Int(relative), now)
     }
 }
 

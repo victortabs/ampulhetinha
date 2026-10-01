@@ -319,15 +319,10 @@ struct SettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
 
-    private let maxOptions = [60, 180, 360, 720, 1440, 2880]
-
     var body: some View {
         Form {
             Section("Geral") {
                 Toggle("Mostrar contagem regressiva na barra de menus", isOn: $settings.showCountdown)
-                Picker("Arrastar até o pé da tela vale", selection: $settings.maxDragMinutes) {
-                    ForEach(maxOptions, id: \.self) { Text(Fmt.longDuration(minutes: $0)).tag($0) }
-                }
                 Toggle("Abrir ao iniciar sessão", isOn: Binding(
                     get: { launchAtLogin },
                     set: { setLaunchAtLogin($0) }
